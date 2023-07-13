@@ -84,6 +84,12 @@ def get_device_lock(device_id):
 request_queue = Queue()
 
 class CustomRequestHandler(BaseHTTPRequestHandler):
+    # словарь, содержащий очереди для каждого устройства
+    device_queues = {}
+
+    # словарь, содержащий блокировки для каждого обработчика заданий
+    handler_locks = {}
+    
     def _send_response(self, message):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
@@ -100,35 +106,39 @@ class CustomRequestHandler(BaseHTTPRequestHandler):
             pin = params.get('pin', [None])[0]
             device_serial = params.get('srl', [None])[0]
 
+        if device_serial not in self.handler_locks:
+            self.handler_locks[device_serial] = threading.Lock()
+
+        with self.handler_locks[device_serial]:
+
+            # Создание новой очереди для устройства, если её ещё нет
+            if device_serial not in self.device_queues:
+                self.device_queues[device_serial] = Queue()
+            
             if params.get('login') == ['true']:
-                request_queue.put((pin, device_serial, device_id, 'test_login'))
-                self._send_response('Login test started')
+                self.device_queues[device_serial].put((pin, device_id, 'test_login'))
+                self._send_response('Login test added to queue')
 
             elif params.get('logout') == ['true']:
-                request_queue.put(('dummy_pin', device_serial, device_id, 'test_logout'))  # assuming pin is not required for logout
+                self.device_queues[device_serial].put(('dummy_pin', device_id, 'test_logout'))  # assuming pin is not required for logout
                 self._send_response('Logout test added to queue')
 
             else:
                 self._send_response('No valid header found')
 
-num_worker_threads = 2 # Количество рабочих потоков
+            # Если в очереди только одно задание, запускаем обработчик
+            if self.device_queues[device_serial].qsize() == 1:
+                threading.Thread(target=self.handle_device_requests, args=(device_serial,)).start()
 
-def worker():
-    while True:
-        # If there are tasks in the queue, take one and run it
-        if not request_queue.empty():
-            pin, device_serial, device_id, test_name = request_queue.get()
+    def handle_device_requests(self, device_serial):
+        while not self.device_queues[device_serial].empty():
+            pin, device_id, test_name = self.device_queues[device_serial].get()
+
             suite = unittest.TestSuite()
             suite.addTest(TestAppiumWithPin(pin, device_serial, device_id, test_name))
             unittest.TextTestRunner().run(suite)
-            request_queue.task_done()
 
-# Start worker threads
-for i in range(num_worker_threads):
-    t = threading.Thread(target=worker)
-    t.daemon = True
-    t.start()
-
+#num_worker_threads = 2 # Количество рабочих потоков
 
 class TestAppium(unittest.TestCase):
     driver = None
