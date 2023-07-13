@@ -12,12 +12,12 @@ import logging
 import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+import threading
 from queue import Queue
 from urllib.parse import urlparse, parse_qs
 
-os.environ['ANDROID_HOME'] = "/home/android_sdk"
-os.environ['JAVA_HOME'] = "/usr/lib/jvm/java-16-openjdk-amd64"
+# os.environ['ANDROID_HOME'] = "/home/android_sdk"
+# os.environ['JAVA_HOME'] = "/usr/lib/jvm/java-16-openjdk-amd64"
 
 # Configure logging
 logging.basicConfig(format='%(asctime)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
@@ -58,7 +58,27 @@ def open_iproxy(device_serial, device_id):
         if start_stderr:
             logging.error('Error: %s', start_stderr.decode())
 
-appium_server_url = 'http://localhost:4723'
+# Создаем очередь, содержащую адреса всех серверов Appium
+appium_servers = Queue()
+appium_servers.put('http://localhost:4723')
+appium_servers.put('http://localhost:4724')
+
+# Получаем свободный сервер Appium
+def get_appium_server():
+    server = appium_servers.get()  # извлекаем URL свободного сервера из очереди
+    return server
+
+# Возвращаем использованный сервер обратно в очередь
+def release_appium_server(server):
+    appium_servers.put(server)
+
+#словарь с блокировками
+device_locks = {}
+
+def get_device_lock(device_id):
+    if device_id not in device_locks:
+        device_locks[device_id] = threading.Lock()
+    return device_locks[device_id]
 
 # Create a queue to store the incoming requests
 request_queue = Queue()
@@ -91,7 +111,9 @@ class CustomRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._send_response('No valid header found')
 
-def handle_requests():
+num_worker_threads = 2 # Количество рабочих потоков
+
+def worker():
     while True:
         # If there are tasks in the queue, take one and run it
         if not request_queue.empty():
@@ -101,8 +123,11 @@ def handle_requests():
             unittest.TextTestRunner().run(suite)
             request_queue.task_done()
 
-request_handler = Thread(target=handle_requests)
-request_handler.start()
+# Start worker threads
+for i in range(num_worker_threads):
+    t = threading.Thread(target=worker)
+    t.daemon = True
+    t.start()
 
 
 class TestAppium(unittest.TestCase):
@@ -124,98 +149,110 @@ class TestAppiumWithPin(TestAppium):
         self.pin = pin
         self.device_serial = device_serial
         self.device_id = device_id
+        self.lock = get_device_lock(self.device_id)
 
-    #set capabilities for each test separatelly
-    def setUp(self):
+    def setUp(self): #set capabilities for each test separatelly
         capabilities = dict(
             platformName='Android',
             automationName='uiautomator2',
             udid=self.device_serial,
             deviceName=self.device_id,
         )
-        self.driver = webdriver.Remote(appium_server_url, capabilities)
-        self.wait = WebDriverWait(self.driver, 10)        
+        self.appium_server_url = get_appium_server()  # здесь мы получаем URL свободного сервера
+        self.driver = webdriver.Remote(self.appium_server_url, capabilities)
+        self.wait = WebDriverWait(self.driver, 10)       
 
     def tearDown(self):
         if self.driver is not None:
             self.driver.quit()
-
+            release_appium_server(self.appium_server_url)  # освобождаем сервер после выполнения теста
+    
     def test_login(self) -> None:
-        max_attempts = 3
-        PIN = self.pin  # Consider retrieving this from a more secure place
-        logging.info('test_login started')
-        open_iproxy(self.device_serial, self.device_id)
-        logging.info('iproxy opened')
+        self.lock.acquire()  # Acquire the lock
+        try:
+            max_attempts = 3
+            PIN = self.pin  # Consider retrieving this from a more secure place
+            logging.info('test_login started')
+            open_iproxy(self.device_serial, self.device_id)
+            logging.info('iproxy opened')
 
-        for attempt in range(max_attempts):
-            try:
-                self.click_use_pin()
-                self.input_pin(PIN)
-                self.click_login()
-                self.selecting_connection()
-                self.popup_in_use()
-                self.selecting_connection()
-                
-                # Проверка успешного входа в систему
+            for attempt in range(max_attempts):
                 try:
-                    WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, '//android.widget.TextView[@text="Proxy"]')))
-                    logging.info("Successfully LOGGED IN")
+                    self.click_use_pin()
+                    self.input_pin(PIN)
+                    self.click_login()
+                    self.selecting_connection()
+                    self.popup_in_use()
+                    self.selecting_connection()
+                    
+                    # Проверка успешного входа в систему
+                    logging.info("блок проверки входа в систему")
+                    try:
+                        WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, '//android.widget.TextView[@text="Proxy"]')))
+                        logging.info("Successfully LOGGED IN")
 
-                    #check proxy status
-                    proxy_status = self.toggle_status()
-                    if proxy_status == "Proxy is disabled":
-                        self.proxy_switcher()  # call proxy_switcher if proxy is disabled
-                    elif proxy_status == "Proxy is enabled":
-                        logging.info("Proxy is already enabled")
+                        #check proxy status
+                        proxy_status = self.toggle_status()
+                        if proxy_status == "Proxy is disabled":
+                            self.proxy_switcher()  # call proxy_switcher if proxy is disabled
+                        elif proxy_status == "Proxy is enabled":
+                            logging.info("Proxy is already enabled")
 
-                    break
+                        break
 
-                except TimeoutException:
-                    logging.info("LOGIN unsuccessful. Retrying...")
+                    except TimeoutException:
+                        logging.info("LOGIN unsuccessful. Retrying...")
+                        continue
+                    
+                    
+                except (StaleElementReferenceException, NoSuchElementException, TimeoutException) as e:
+                    logging.info(f"Error during login attempt {attempt + 1}: {e}. Retrying...")
                     continue
-                
-                
-            except (StaleElementReferenceException, NoSuchElementException, TimeoutException) as e:
-                logging.info(f"Error during login attempt {attempt + 1}: {e}. Retrying...")
-                continue
+        finally:
+            self.lock.release()  # Always release the lock
 
     def test_logout(self):
-        max_attempts = 3
-        logging.info('test_logout started')
-        open_iproxy(self.device_serial, self.device_id)
-        logging.info('iproxy opened')
+        self.lock.acquire()  # Acquire the lock
+        try:
+            max_attempts = 3
+            logging.info('test_logout started')
+            open_iproxy(self.device_serial, self.device_id)
+            logging.info('iproxy opened')
 
-        for attempt in range(max_attempts):
-            try:
-                self.click_more()
-                self.chose_logout()
-                self.confirm_logout()
-                                
-                # Проверка успешного выхода из системы
+            for attempt in range(max_attempts):
                 try:
-                    logout_status = WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, '//android.widget.TextView[@text="LOG IN"]')))
-                    logging.info("Successfully LOGGED OUT")
-                    return logout_status.text
+                    self.click_more()
+                    self.chose_logout()
+                    self.confirm_logout()
+                                    
+                    # Проверка успешного выхода из системы
+                    try:
+                        logout_status = WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, '//android.widget.TextView[@text="LOG IN"]')))
+                        logging.info("Successfully LOGGED OUT")
+                        return logout_status.text
+
+                    except TimeoutException:
+                        logging.info("Logout unsuccessful. Retrying...")
+                        continue
+                    
+                except (StaleElementReferenceException, NoSuchElementException, TimeoutException) as e:
+                    logging.info(f"Error during logout attempt {attempt + 1}: {e}. Retrying...")
+                    continue
+
+                # Добавляем проверку устаревания элемента
+                try:
+                    WebDriverWait(self.driver, 10).until(EC.staleness_of(logout_status))
+                    logging.info("Logout status element is stale. Retrying...")
+                    continue
 
                 except TimeoutException:
-                    logging.info("Logout unsuccessful. Retrying...")
-                    continue
+                    pass
+
+                # Если проверка устаревания не вызвала исключение, можно продолжить выполнение кода
+                self.signing_out()
                 
-            except (StaleElementReferenceException, NoSuchElementException, TimeoutException) as e:
-                logging.info(f"Error during logout attempt {attempt + 1}: {e}. Retrying...")
-                continue
-
-            # Добавляем проверку устаревания элемента
-            try:
-                WebDriverWait(self.driver, 10).until(EC.staleness_of(logout_status))
-                logging.info("Logout status element is stale. Retrying...")
-                continue
-
-            except TimeoutException:
-                pass
-            
-            # Если проверка устаревания не вызвала исключение, можно продолжить выполнение кода
-            self.signing_out()
+        finally:
+            self.lock.release()  # Always release the lock
 
     def click_use_pin(self) -> None:
         logging.info("starting function 'click_use_pin'")
@@ -259,7 +296,7 @@ class TestAppiumWithPin(TestAppium):
             popup_selecting = WebDriverWait(self.driver, 10).until(EC.visibility_of_element_located((By.XPATH, '//android.widget.TextView[@text="Selecting connection…"]')))
             logging.info(f"found popup with text {popup_selecting.text}")
 
-            # Ожидаем исчезновения всплывающего окна в течение 15 секунд
+            # Ожидаем исчезновения всплывающего окна в течение 30 секунд
             WebDriverWait(self.driver, 30).until(EC.invisibility_of_element_located((By.XPATH, '//android.widget.TextView[@text="Selecting connection…"]')))
             logging.info("popup 'selecting_connection' DISSAPEARED")
 
