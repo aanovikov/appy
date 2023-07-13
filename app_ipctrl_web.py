@@ -190,9 +190,8 @@ class TestAppiumWithPin(TestAppium):
                 self.click_more()
                 self.chose_logout()
                 self.confirm_logout()
-                self.signing_out()
-                
-                # Проверка успешного входа в систему
+                                
+                # Проверка успешного выхода из системы
                 try:
                     logout_status = WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, '//android.widget.TextView[@text="LOG IN"]')))
                     logging.info("Successfully LOGGED OUT")
@@ -205,6 +204,18 @@ class TestAppiumWithPin(TestAppium):
             except (StaleElementReferenceException, NoSuchElementException, TimeoutException) as e:
                 logging.info(f"Error during logout attempt {attempt + 1}: {e}. Retrying...")
                 continue
+
+            # Добавляем проверку устаревания элемента
+            try:
+                WebDriverWait(self.driver, 10).until(EC.staleness_of(logout_status))
+                logging.info("Logout status element is stale. Retrying...")
+                continue
+
+            except TimeoutException:
+                pass
+            
+            # Если проверка устаревания не вызвала исключение, можно продолжить выполнение кода
+            self.signing_out()
 
     def click_use_pin(self) -> None:
         logging.info("starting function 'click_use_pin'")
