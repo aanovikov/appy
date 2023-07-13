@@ -34,14 +34,9 @@ def battery_opt():
     if stderr:
         logging.info('Error: ', stderr.decode())
 
-def scroll_to_text(driver, text):
-    element = driver.find_element(MobileBy.ANDROID_UIAUTOMATOR,
-                                  'new UiScrollable(new UiSelector().resourceId("android:id/list")).scrollIntoView(new UiSelector().text("'+ text +'"))')
-    return element
-
-def open_iproxy():
+def open_iproxy(device_serial, device_id):
     # Run the ADB command to check the focused application
-    adb_command = 'adb shell dumpsys window windows | grep -E "mCurrentFocus|mFocusedApp"'
+    adb_command = f'adb -s {device_serial} shell dumpsys window windows | grep -E "mCurrentFocus|mFocusedApp"'
     process = subprocess.Popen(adb_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
 
@@ -54,7 +49,7 @@ def open_iproxy():
         logging.info('The application is already on the screen.')
     else:
         # Application is in the background, start it
-        start_command = 'adb shell am start -n com.iproxy.android/com.iproxy.android.MainActivity'
+        start_command = f'adb -s {device_serial} shell am start -n com.iproxy.android/com.iproxy.android.MainActivity'
         start_process = subprocess.Popen(start_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         start_stdout, start_stderr = start_process.communicate()
 
@@ -62,12 +57,6 @@ def open_iproxy():
             logging.info('Output: %s', start_stdout.decode())
         if start_stderr:
             logging.error('Error: %s', start_stderr.decode())
-
-# capabilities = dict(
-#     platformName='Android',
-#     automationName='uiautomator2',
-#     deviceName=self.device_name,
-# )
 
 appium_server_url = 'http://localhost:4723'
 
@@ -87,19 +76,16 @@ class CustomRequestHandler(BaseHTTPRequestHandler):
 
         if url.path == '/api':
             params = parse_qs(url.query)
-            #id = params.get('id', [None])[0]
+            device_id = params.get('id', [None])[0]
             pin = params.get('pin', [None])[0]
-            serial = params.get('srl', [None])[0]
+            device_serial = params.get('srl', [None])[0]
 
             if params.get('login') == ['true']:
-                request_queue.put((pin, serial, 'test_login'))
-                #suite = unittest.TestSuite()
-                #suite.addTest(TestAppiumWithPin(pin, serial, 'test_login'))
-                #unittest.TextTestRunner().run(suite)
+                request_queue.put((pin, device_serial, device_id, 'test_login'))
                 self._send_response('Login test started')
 
             elif params.get('logout') == ['true']:
-                request_queue.put(('dummy_pin', serial, 'test_logout'))  # assuming pin is not required for logout
+                request_queue.put(('dummy_pin', device_serial, device_id, 'test_logout'))  # assuming pin is not required for logout
                 self._send_response('Logout test added to queue')
 
             else:
@@ -109,9 +95,9 @@ def handle_requests():
     while True:
         # If there are tasks in the queue, take one and run it
         if not request_queue.empty():
-            pin, serial, test_name = request_queue.get()
+            pin, device_serial, device_id, test_name = request_queue.get()
             suite = unittest.TestSuite()
-            suite.addTest(TestAppiumWithPin(pin, serial, test_name))
+            suite.addTest(TestAppiumWithPin(pin, device_serial, device_id, test_name))
             unittest.TextTestRunner().run(suite)
             request_queue.task_done()
 
@@ -133,17 +119,19 @@ class TestAppium(unittest.TestCase):
             cls.driver.quit()
 
 class TestAppiumWithPin(TestAppium):
-    def __init__(self, pin, device_name, *args, **kwargs):
+    def __init__(self, pin, device_serial, device_id, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.pin = pin
-        self.device_name = device_name
+        self.device_serial = device_serial
+        self.device_id = device_id
 
     #set capabilities for each test separatelly
     def setUp(self):
         capabilities = dict(
             platformName='Android',
             automationName='uiautomator2',
-            deviceName=self.device_name,
+            udid=self.device_serial,
+            deviceName=self.device_id,
         )
         self.driver = webdriver.Remote(appium_server_url, capabilities)
         self.wait = WebDriverWait(self.driver, 10)        
@@ -156,7 +144,7 @@ class TestAppiumWithPin(TestAppium):
         max_attempts = 3
         PIN = self.pin  # Consider retrieving this from a more secure place
         logging.info('test_login started')
-        open_iproxy()
+        open_iproxy(self.device_serial, self.device_id)
         logging.info('iproxy opened')
 
         for attempt in range(max_attempts):
@@ -194,7 +182,7 @@ class TestAppiumWithPin(TestAppium):
     def test_logout(self):
         max_attempts = 3
         logging.info('test_logout started')
-        open_iproxy()
+        open_iproxy(self.device_serial, self.device_id)
         logging.info('iproxy opened')
 
         for attempt in range(max_attempts):
@@ -334,6 +322,10 @@ class TestAppiumWithPin(TestAppium):
             # Если элемент не появился или не исчез в заданный период времени
             logging.info("Popup 'signing_out' NOT APPEARED or DID NOT DISAPPEAR in time")
 
+    def scroll_to_text(driver, text):
+        element = driver.find_element(MobileBy.ANDROID_UIAUTOMATOR,
+                                    'new UiScrollable(new UiSelector().resourceId("android:id/list")).scrollIntoView(new UiSelector().text("'+ text +'"))')
+        return element
 
 if __name__ == '__main__':
     server_address = ('', 8000)
