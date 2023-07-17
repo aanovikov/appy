@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 from queue import Queue
 from urllib.parse import urlparse, parse_qs
+from collections import defaultdict
 
 # os.environ['ANDROID_HOME'] = "/home/android_sdk"
 # os.environ['JAVA_HOME'] = "/usr/lib/jvm/java-16-openjdk-amd64"
@@ -84,11 +85,17 @@ def get_device_lock(device_id):
 request_queue = Queue()
 
 class CustomRequestHandler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.handler_statuses = {}
+
+    handler_statuses = defaultdict(bool)
+
     # словарь, содержащий очереди для каждого устройства
-    device_queues = {}
+    device_queues = defaultdict(Queue)
 
     # словарь, содержащий блокировки для каждого обработчика заданий
-    handler_locks = {}
+    handler_locks = defaultdict(threading.Lock)
     
     def _send_response(self, message):
         self.send_response(200)
@@ -99,47 +106,63 @@ class CustomRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         # Parse URL
         url = urlparse(self.path)
-
         if url.path == '/api':
             params = parse_qs(url.query)
             device_id = params.get('id', [None])[0]
             pin = params.get('pin', [None])[0]
             device_serial = params.get('srl', [None])[0]
 
-        if device_serial not in self.handler_locks:
-            self.handler_locks[device_serial] = threading.Lock()
-
-        with self.handler_locks[device_serial]:
-
-            # Создание новой очереди для устройства, если её ещё нет
-            if device_serial not in self.device_queues:
-                self.device_queues[device_serial] = Queue()
+            print(f"Received request for device {device_serial}")
             
-            if params.get('login') == ['true']:
-                self.device_queues[device_serial].put((pin, device_id, 'test_login'))
-                self._send_response('Login test added to queue')
+            # if device_serial not in self.handler_statuses or not self.handler_statuses[device_serial]:
+            #     self.handler_statuses[device_serial] = True
+            #     threading.Thread(target=self.handle_device_requests, args=(device_serial,)).start()
 
-            elif params.get('logout') == ['true']:
-                self.device_queues[device_serial].put(('dummy_pin', device_id, 'test_logout'))  # assuming pin is not required for logout
-                self._send_response('Logout test added to queue')
+            with self.handler_locks[device_serial]:
+                if params.get('login') == ['true']:
+                    self.device_queues[device_serial].put((pin, device_id, 'test_login'))
+                    self._send_response('Login test added to queue')
 
-            else:
-                self._send_response('No valid header found')
+                elif params.get('logout') == ['true']:
+                    self.device_queues[device_serial].put(('dummy_pin', device_id, 'test_logout'))  # assuming pin is not required for logout
+                    self._send_response('Logout test added to queue')
 
-            # Если в очереди только одно задание, запускаем обработчик
-            if self.device_queues[device_serial].qsize() == 1:
-                threading.Thread(target=self.handle_device_requests, args=(device_serial,)).start()
+                else:
+                    self._send_response('No valid header found')
+
+                # Запускаем обработчик, если в очереди есть задания и обработчик не запущен
+                if not self.device_queues[device_serial].empty() and not self.handler_statuses.get(device_serial, False):
+                    self.handler_statuses[device_serial] = True
+                    threading.Thread(target=self.handle_device_requests, args=(device_serial,)).start()
 
     def handle_device_requests(self, device_serial):
+        print(f"Starting handler for device {device_serial}")
+        self.handler_statuses[device_serial] = False
+
         while not self.device_queues[device_serial].empty():
             pin, device_id, test_name = self.device_queues[device_serial].get()
 
             suite = unittest.TestSuite()
-            suite.addTest(TestAppiumWithPin(pin, device_serial, device_id, test_name))
-            unittest.TextTestRunner().run(suite)
+            suite.addTest(TestAppiumWithPin(pin, device_serial, device_id, test_name, self.handler_locks[device_serial]))
+            result = unittest.TextTestRunner().run(suite)
+            
+            # Если тесты завершились успешно, переходим к следующему заданию    
+            if result.wasSuccessful():
+                continue
+            else:
+                print(f"Test failed for device {device_serial}")
 
-#num_worker_threads = 2 # Количество рабочих потоков
+            
+    def process_next_task(self, device_id): #Берёт задачу из очереди для устройства и передаёт ее в обработчик.
+        if not self.device_queues[device_id].empty():
+            task = self.device_queues[device_id].get()
+            self.process_task(task, device_id)
 
+    
+    def process_task(self, task, device_id):
+        # обработка задачи...
+        self.process_next_task(device_id)
+    
 class TestAppium(unittest.TestCase):
     driver = None
     wait = None
@@ -153,14 +176,14 @@ class TestAppium(unittest.TestCase):
         if cls.driver is not None:
             cls.driver.quit()
 
-class TestAppiumWithPin(TestAppium):
-    def __init__(self, pin, device_serial, device_id, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class TestAppiumWithPin(unittest.TestCase):
+    def __init__(self, pin, device_serial, device_id, test_name, lock):
+        super(TestAppiumWithPin, self).__init__(test_name)
         self.pin = pin
         self.device_serial = device_serial
         self.device_id = device_id
-        self.lock = get_device_lock(self.device_id)
-
+        self.lock = lock
+        
     def setUp(self): #set capabilities for each test separatelly
         capabilities = dict(
             platformName='Android',
@@ -298,6 +321,7 @@ class TestAppiumWithPin(TestAppium):
         except TimeoutException:
             # Если всплывающее окно не появилось, продолжаем выполнение кода
             logging.info("Popup connection is in use NOT APPEARED")
+            pass
     
     def selecting_connection(self):
         try:
