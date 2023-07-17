@@ -86,11 +86,11 @@ class CustomRequestHandler(BaseHTTPRequestHandler):
             
             if params.get('login') == ['true']:
                 self.device_queues[device_serial].put((pin, device_id, 'test_login'))
-                self._send_response('Login test added to queue')
+                self._send_response('Login done')
 
             elif params.get('logout') == ['true']:
                 self.device_queues[device_serial].put(('dummy_pin', device_id, 'test_logout'))  # assuming pin is not required for logout
-                self._send_response('Logout test added to queue')
+                self._send_response('Logout done')
 
             else:
                 self._send_response('No valid header found')
