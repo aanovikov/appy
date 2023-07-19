@@ -57,6 +57,21 @@ def open_iproxy(device_serial, device_id, logger):
         if start_stderr:
             logger.error('Error: %s', start_stderr.decode())
 
+def reboot(device_serial, device_id, logger):
+    try:
+        logger.info(f"Rebooting {device_id} with serial {device_serial}")
+        adb_command = f'adb -s {device_serial} reboot'
+        process = subprocess.Popen(adb_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+
+        if process.returncode != 0:
+            logger.error(f"Failed to reboot {device_id} with serial {device_serial}. Error: {stderr.decode()}")
+        else:
+            logger.info(f"Reboot command successfully executed. Output: {stdout.decode()}")
+
+    except Exception as e:
+        logger.error(f"Failed to execute reboot command. Error: {e}")
+
 # Create a queue to store the incoming requests
 request_queue = Queue()
 
@@ -73,7 +88,7 @@ class CustomRequestHandler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             self.logger.info("Client closed the connection before the response could be sent.")
             pass  # or log error message if you prefer
-
+    
     def do_GET(self):
         # Parse URL
         url = urlparse(self.path)
@@ -95,6 +110,11 @@ class CustomRequestHandler(BaseHTTPRequestHandler):
             elif params.get('logout') == ['true']:
                 self.device_queues[device_serial].put(('None', device_id, 'test_logout'))  # assuming pin is not required for logout
                 self._send_response('Logout done')
+
+            elif params.get('reboot') == ['true']:
+                device_id_logger = logging.getLogger(device_id)
+                reboot(device_serial, device_id, device_id_logger)  # call reboot function
+                self._send_response(f'reboot started for {device_id}')
 
             else:
                 self._send_response('No valid header found')
@@ -199,10 +219,7 @@ class TestAppiumWithPin(TestAppium):
             except (StaleElementReferenceException, NoSuchElementException, TimeoutException) as e:
                 self.logger.info(f"Error during login attempt {attempt + 1}: {e}. Retrying...")
                 continue
-
-
-
-
+    
     def test_logout(self):
         max_attempts = 3
         self.logger.info("test_logout started")
